@@ -82,7 +82,7 @@ int main(int argc, char *argv[]) {
 	int r;
 	char *search = "gcc\377";
 
-	fd = open("/var/cache/command-not-found/db", O_RDONLY);
+	fd = open("./db", O_RDONLY);
 	if (fd < 0)
 		abort();
 	r = fstat(fd, &st);
