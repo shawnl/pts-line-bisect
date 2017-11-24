@@ -392,80 +392,6 @@ STATIC void cache_init(struct cache *cache) {
   cache->active = 3;
 }
 
-/* x[:xsize] must not contain '\n'. */
-STATIC const struct cache_entry *get_using_cache(
-    yfile *yf, struct cache *cache, off_t ofs,
-    const char *x, size_t xsize, compare_mode_t cm) {
-  int a = cache->active;
-  struct cache_entry *entry;
-  off_t fofs;
-  assert(ofs >= 0);
-  /* TODO(pts): Add tests for efficient and correct cache usage. */
-  /* TODO(pts): Add tests for code coverage. */
-  if (CACHE_HAS_0(a) &&
-      cache->e[0].ofs <= ofs && ofs <= cache->e[0].fofs) {
-    if (a == 1) cache->active = a = 0;
-  } else if (CACHE_HAS_1(a) &&
-             cache->e[1].ofs <= ofs && ofs <= cache->e[1].fofs) {
-    if (a == 0) cache->active = a = 1;
-  } else {
-    fofs = get_fofs(yf, ofs);
-    assert(ofs <= fofs);
-    if (CACHE_HAS_0(a) && cache->e[0].fofs == fofs) {
-      if (a == 1) cache->active = a = 0;
-      if (cache->e[0].ofs > ofs) cache->e[0].ofs = ofs;
-    } else if (CACHE_HAS_1(a) && cache->e[1].fofs == fofs) {
-      if (a == 0) cache->active = a = 1;
-      if (cache->e[1].ofs > ofs) cache->e[1].ofs = ofs;
-    } else {
-      if (CACHE_HAS_0(a)) {
-        cache->active = a = CACHE_GET_ACTIVE(a) ^ 1;
-        entry = cache->e + a;
-      } else {
-        cache->active = a = 2;
-        entry = cache->e;
-      }
-      /* Fill newly activated cache entry. */
-      entry->fofs = fofs;
-      entry->ofs = ofs;
-      entry->cmp_result = compare_line(yf, fofs, x, xsize, cm);
-      return entry;  /* Shortcut, the return below would do the same. */
-    }
-  }
-  return cache->e + CACHE_GET_ACTIVE(a);
-}
-
-STATIC off_t get_fofs_using_cache(
-    yfile *yf, struct cache *cache, off_t ofs) {
-  int a = cache->active;
-  off_t fofs;
-  assert(ofs >= 0);
-  if (ofs == 0) return 0;
-  if (CACHE_HAS_0(a) &&
-      cache->e[0].ofs <= ofs && ofs <= cache->e[0].fofs) {
-    if (a == 1) cache->active = a = 0;
-    return cache->e[0].fofs;
-  } else if (CACHE_HAS_1(a) &&
-             cache->e[1].ofs <= ofs && ofs <= cache->e[1].fofs) {
-    if (a == 0) cache->active = a = 1;
-    return cache->e[1].fofs;
-  } else {
-    fofs = get_fofs(yf, ofs);
-    assert(ofs <= fofs);
-    if (CACHE_HAS_0(a) && cache->e[0].fofs == fofs) {
-      if (a == 1) cache->active = a = 0;
-      if (cache->e[0].ofs > ofs) cache->e[0].ofs = ofs;
-    } else if (CACHE_HAS_1(a) && cache->e[1].fofs == fofs) {
-      if (a == 0) cache->active = a = 1;
-      if (cache->e[1].ofs > ofs) cache->e[1].ofs = ofs;
-    }
-    /* We don't update the cache, because we don't know cmp_result, and we
-     * are too lazy to compute it.
-     */
-    return fofs;
-  }
-}
-
 /* x[:xsize] must not contain '\n'.
  *
  * cm=CM_LE is equivalent to is_left=true and is_open=true.
@@ -473,28 +399,30 @@ STATIC off_t get_fofs_using_cache(
  * cm=CL_LP is also supported, it does prefix search.
  */
 STATIC off_t bisect_way(
-    yfile *yf, struct cache *cache, off_t lo, off_t hi,
+    yfile *yf, off_t lo, off_t hi,
     const char *x, size_t xsize, compare_mode_t cm) {
   const off_t size = yfgetsize(yf);
   off_t mid, midf;
-  const struct cache_entry *entry;
+  struct cache_entry entry;
   if (hi + 0ULL > size + 0ULL) hi = size;  /* Also applies to hi == -1. */
   if (xsize == 0) {  /* Shortcuts. */
     if (cm == CM_LE) hi = lo;  /* Faster for lo == 0. Returns right below. */
     if (cm == CM_LP && hi == size) return hi;
   }
-  if (lo >= hi) return get_fofs_using_cache(yf, cache, lo);
+  if (lo >= hi) return get_fofs(yf, lo);
   do {
     mid = (lo + hi) >> 1;
-    entry = get_using_cache(yf, cache, mid, x, xsize, cm);
-    midf = entry->fofs;
-    if (entry->cmp_result) {
+    entry.fofs = get_fofs(yf, mid);
+    entry.ofs = mid;
+    entry.cmp_result = compare_line(yf, mid, x, xsize, cm);
+    midf = entry.fofs;
+    if (entry.cmp_result) {
       hi = mid;
     } else {
       lo = mid + 1;
     }
   } while (lo < hi);
-  return mid == lo ? midf : get_fofs_using_cache(yf, cache, lo);
+  return mid == lo ? midf : get_fofs(yf, lo);
 }
 
 /* x[:xsize] and y[:ysize] must not contain '\n'. */
@@ -507,13 +435,13 @@ STATIC void bisect_interval(
   struct cache cache;
   /* TODO(pts): If y < x, then don't even read the file. Smart compare! */
   cache_init(&cache);
-  *start_out = start = bisect_way(yf, &cache, lo, hi, x, xsize, CM_LE);
+  *start_out = start = bisect_way(yf,lo, hi, x, xsize, CM_LE);
   if (cm == CM_LE && xsize == ysize && 0 == memcmp(x, y, xsize)) {
     *end_out = start;
   } else {
     /* Don't use a shared cache, because x or cm are different. */
     cache_init(&cache);
-    *end_out = bisect_way(yf, &cache, start, hi, y, ysize, cm);
+    *end_out = bisect_way(yf, start, hi, y, ysize, cm);
   }
 }
 
@@ -749,7 +677,7 @@ int main(int argc, char **argv) {
   if (!y && cm == CM_LE && printing == PR_OFFSETS) {
     struct cache cache;
     cache_init(&cache);
-    start = bisect_way(yf, &cache, 0, (off_t)-1, x, xsize, cmstart);
+    start = bisect_way(yf, 0, (off_t)-1, x, xsize, cmstart);
     yfclose(yf);
     ofsp = ofsbuf;
     ofsp = format_unsigned(ofsp, start);
@@ -758,19 +686,18 @@ int main(int argc, char **argv) {
   } else if (printing == PR_DETECT &&
              (!y || (xsize == ysize && 0 == memcmp(x, y, xsize)))) {
     /* This branch is just a shortcut, it doesn't change the results. */
-    struct cache cache;
-    const struct cache_entry *entry;
+    struct cache_entry entry;
     /* Shortcut just to detect if x is present. */
     if (cm == CM_LE) exit(3);  /* start:end range would always be empty. */
-    cache_init(&cache);
-    start = bisect_way(yf, &cache, 0, (off_t)-1, x, xsize, CM_LE);
-    cache_init(&cache);  /* Can't reuse cache, cm has changed. */
+    start = bisect_way(yf, 0, (off_t)-1, x, xsize, CM_LE);
     /* We don't benefit any speed from the cache here (because it's empty),
      * but we reuse the existing code to compare a single line from yf.
      */
-    entry = get_using_cache(yf, &cache, start, x, xsize, cm);
+    entry.fofs = get_fofs(yf, start);
+    entry.ofs = start;
+    entry.cmp_result = compare_line(yf, start, x, xsize, cm);
     yfclose(yf);
-    if (entry->cmp_result) exit(3);  /* exit(3) iff x not found in yf. */
+    if (entry.cmp_result) exit(3);  /* exit(3) iff x not found in yf. */
   } else {
     if (!y) {
       y = x;
